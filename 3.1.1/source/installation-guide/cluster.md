@@ -4,6 +4,14 @@
 ## Introduction
 If you have requirements for high availability (HA) or failover, you can configure your Gluu Server for multi-master replication by following the instructions below.
 
+My server configurations are like so:
+
+```
+45.55.232.15    c4.gluu.org (NGINX server)
+159.203.126.10  c5.gluu.org (Gluu 3.1.1 server/Ubuntu 14)
+138.197.65.243  c6.gluu.org (Gluu 3.1.1 server/Ubuntu 14)
+```
+
 ## Prerequisites
 
 Some prerequisites are necessary for setting up Gluu with delta-syncrepl MMR:
@@ -15,76 +23,44 @@ Some prerequisites are necessary for setting up Gluu with delta-syncrepl MMR:
 
 ## Concept
 
-Multi-master replication with OpenLDAP through delta-syncrepl by creating an accesslog database and configuring synchronization by means the slapd.conf file. The ldap.conf file for all the servers will allow the self-signed certs that Gluu creates and configuring the symas-openldap.conf to allow external connections for LDAP. There are also some additional steps that are required to persist Gluu functionality across servers. This is where a load-balancer/proxy are required.
+Multi-master replication with OpenLDAP through delta-syncrepl by creating an accesslog database and configuring synchronization by means the slapd.conf file. The ldap.conf file for all the servers will allow the self-signed certs that Gluu creates and configuring the symas-openldap.conf to allow external connections for LDAP. There are also some additional steps that are required to persist Gluu functionality across servers. This is where a load-balancer/proxy is required.
 
 ## Instructions
 
 ### 1. [Install Gluu](https://gluu.org/docs/ce/3.1.0/installation-guide/install/) on one of the servers making sure to use a separate NGINX server FQDN as hostname.
 
-- A separate NGINX server is recommended, but not necessary, since replicating a Gluu server to a different hostname breaks the functionality of the Gluu web page, when using a hostname other than what is in the certificates. For example, if I used c1.gluu.info as my host and copied that to a second server (e.g. c2.gluu.info), the process of accessing the site on c2.gluu.info, even with replication, will fail authentication, due to hostname conflict. So if c1 failed, you couldn't access the Gluu web GUI anymore.
+- A separate NGINX server is necessary, since replicating a Gluu server to a different hostname breaks the functionality of the Gluu web page, when using a hostname other than what is in the certificates. For example, if I used c1.gluu.info as my host and copied that to a second server (e.g. c2.gluu.info), the process of accessing the site on c2.gluu.info, even with replication, will fail authentication, due to hostname conflict. So if c1 failed, you couldn't access the Gluu web GUI anymore.
 
-- The other servers should [install the Gluu Server Package](https://gluu.org/docs/ce/3.1.0/installation-guide/install/#install-gluu-server-package) but not run setup.py. This will install the necessary init.d scripts for us.
+- Now for the rest of the servers in the cluster, [Download the Gluu packages](https://gluu.org/docs/ce/3.1.0/installation-guide/install/), but don't run `setup.py` yet.
 
-### 2. Copy the Gluu install environment to the other servers. **This is important before you tar /opt/gluu-server-3.1.0, otherwise it won't work**
-
-```
-Gluu.Root # logout
-# service gluu-server-3.1.0 stop
-```
-
-- Now tar the `/opt/gluu-server-3.1.0/ folder`, copy `gluu.gz` to the other servers and extract it in the /opt/ folder.
+- We want to copy the `/install/community-edition-setu/setup.properties.last` file from this first install to the other servers as `setup.properties` so we have the exact same configurations. (Here I have ssh access to my other server outisde the Gluu chroot)
 
 ```
-tar -cvf gluu.gz /opt/gluu-server-3.1.0/
-scp gluu.gz root@server2.com:/
-...
-```
 
-Server 2 (Other servers, as well, for your replication strategy)
+scp /opt/gluu-server-3.1.1/install/community-edition-setup/setup.properties.last root@c6.gluu.org:/opt/gluu-server-3.1.1/install/community-edition-setup/setup.properties
 
 ```
-service gluu-server-3.1.0 stop
-cd /
-rm -rf /opt/gluu-server-3.1.0/
-tar -xvf gluu.gz
-```
 
-- Make sure the directory structure here is `/opt/gluu-server-3.1.0/`
-
-- For CentOS and RHEL, it is necessary to add your /etc/gluu/keys/gluu-console.pub to ssh into your other Gluu instances, so you can login.
+- Once you have the `setup.properties` file in place on the **other** server, run setup.py inside the Gluu chroot:
 
 ```
-cat /etc/gluu/keys/gluu-console.pub >> /opt/gluu-server-3.1.0/root/.ssh/authorized_keys
-```
 
-
-### 3. Start Gluu, login and modify the `/etc/hosts/` inside the chroot to point the FQDN of the NGINX server to the current server's IP address
-
-- For example, my node 2 server's (c2.gluu.info) ip address is `138.197.100.101` so on server 2:
+Gluu.Root # cd /install/community-edition
+Gluu.Root # ./setup.py
 
 ```
-127.0.0.1       localhost
-::1             ip6-localhost ip6-loopback
-ff02::1         ip6-allnodes
-ff02::2         ip6-allrouters
-138.197.100.101         c3.gluu.info
-```
 
-- Note that my c3 NGINX server FQDN is pointing to my c2 ip.
-
-- Repeat this for every server that Gluu is unpacked on.
-
-- This is necessary to deal with internal routing of NGINX to Apache2 and Apache2 to NGINX. So even though my ip of my FQDN is different, this process still works.
+- The configurations for the install should be automatically loaded and all you need to do here is press `Enter`
 
 ### 4. There needs to be primary server to replicate from initially for delta-syncrepl to inject data from. After the initial sync, all servers will be exactly the same, as delta-syncrepl will fill the newly created database.
 
-- So choose one server as a base and then on every other server:
+- So choose one server as a base and then on every **other** server:
 
 ```
 Gluu.Root # rm /opt/gluu/data/main_db/*.mdb
 ```
 
-- Now make accesslog directories on every servers and give ldap ownership:
+- Now make accesslog directories on **every server** (including the primary server) and give ldap ownership:
 
 ```
 Gluu.Root # mkdir /opt/gluu/data/accesslog_db
@@ -93,7 +69,7 @@ Gluu.Root # chown -R ldap. /opt/gluu/data/
 
 ### 5. Now is where we will set servers to associate with each other for MMR by editing the slapd.conf, ldap.conf and symas-openldap.conf files.
 
-- Creating the slapd.conf file is relatively easy, but can be prone to errors if done manually. Attached is a script and template files for creating multiple slapd.conf files for every server. Download git and clone the necessary files on one server:
+- Creating the slapd.conf file is relatively easy, but can be prone to errors if done manually. Attached is a script and template files for creating multiple slapd.conf files for every server. Download git and clone the necessary files on **one** server:
 
 ```
 Gluu.Root # apt-get update && apt-get install git && cd /tmp/ && git clone https://github.com/GluuFederation/cluster-mgr.git && cd /tmp/cluster-mgr/manual_install/slapd_conf_script/
@@ -108,85 +84,115 @@ Gluu.Root # vi syncrepl.cfg
 - Here we want to change the `ip_address`, `fqn_hostname`, `ldap_password` to our specific server instances. For example:
 
 ```
+
 [server_1]
-ip_address = 192.168.30.133
-fqn_hostname = server1.com
+ip_address = 159.203.126.10
+fqn_hostname = c5.gluu.org
 ldap_password = (your password)
 enable = Yes
 
 [server_2]
-ip_address = 192.168.30.130
-fqn_hostname = server2.com
+ip_address = 138.197.65.243
+fqn_hostname = c6.gluu.org
 ldap_password = (your password)
 enable = Yes
 
 [server_3]
 ...
+[nginx]
+fqn_hostname = c4.gluu.org
+
 ```
 
-- The hostname should be the FQDN of the servers, not the NGINX server.
+ - Include the FQDN's and IP addresses of your Gluu servers and NGINX server (if you want the NGINX configuration file to be created automatically)
 
 - If required, you can change the `/tmp/cluster-mgr/manual_install/slapd_conf_script/ldap_templates/slapd.conf` to fit your specific needs to include different schemas, indexes, etc. Avoid changing any of the `{#variables#}`.
 
 - Now run the python script `create_slapd_conf.py` (Built with python 2.7) in the `/tmp/cluster-mgr/manual_install/slapd_conf_script/` directory :
 
 ```
+
 Gluu.Root # python create_slapd_conf.py
+
 ```
+
 - There is also a 2.6 Python script included.
+
 - This will output multiple `.conf` files in `/tmp/cluster-mgr/manual_install/slapd_conf_script/` named to match your server FQDN:
 
 ```
+
 Gluu.Root #  ls
-... server1_com.conf  server2_com.conf ...
+
+... c5_gluu_org.conf  c6_gluu_org.conf ... nginx.conf
+
 ```
-- Move each .conf file to their respective server replacing the slapd.conf:
+
+- Move each .conf file to their respective server replacing the `slapd.conf`:
+
 ```
-Gluu.Root # /opt/symas/etc/openldap/slapd.conf
+
+Gluu.Root # mv /tmp/cluster-mgr/manual_install/slapd_conf_script/c5_gluu_org.conf /opt/symas/etc/openldap/slapd.conf
+
 ```
+
 and for the other servers
+
 ```
-Gluu.Root # scp server_example_com.conf root@server.example.com:/opt/gluu-server-3.1.0/opt/symas/etc/openldap/slapd.conf
+Gluu.Root # logout
+scp /opt/gluu-server-3.1.1/tmp/cluster-mgr/manual_install/slapd_conf_script/c6_gluu_org.conf root@c6.gluu.org:/opt/gluu-server-3.1.1/opt/symas/etc/openldap/slapd.conf
+
 ```
 
 - Now create and modify the ldap.conf **on every server**:
 
 ```
+
 Gluu.Root # vi /opt/symas/etc/openldap/ldap.conf
-```
-
-- Add these lines
 
 ```
+
+- Add these lines (it's an empty file)
+
+```
+
 TLS_CACERT /etc/certs/openldap.pem
 TLS_REQCERT never
+
 ```
 
 - Modify the HOST_LIST entry of symas-openldap.conf **on every server**:
 
 ```
+
 vi /opt/symas/etc/openldap/symas-openldap.conf
+
 ```
+
 
 - Replace:
 
 ```
+
 HOST_LIST="ldaps://0.0.0.0:1636/"
+
 ```
 
 - With:
 
 ```
+
 HOST_LIST="ldaps://0.0.0.0:1636/ ldaps:///"
+
 ```
 
-- **On all your servers**, inside the chroot, go to `/etc/gluu/conf/` and edit `ox-ldap.properties` replacing:
+- **On all your servers**, inside the chroot, modify `/etc/gluu/conf/ox-ldap.properties` replacing:
 
 `servers: localhost:1636`
 
-With:
+With (obviously use your own FQDN's):
 
-`servers: {insert server1 FQDN here},{inster server2 FQDN here},...`
+`servers: c5.gluu.org:1636,c6.gluu.org:1636,...`
 
 Placing all servers in your cluster topology in this config portion.
 
@@ -229,19 +235,32 @@ Aug 23 22:40:29 dc4 slapd[79544]: syncrepl_message_to_op: rid=001 be_modify
 - From the NGINX server:  
 
 ```
+
 mkdir /etc/nginx/ssl/
+
 scp root@server1.com:/opt/gluu-server-3.1.0/etc/certs/httpd.key /etc/nginx/ssl/
 scp root@server1.com:/opt/gluu-server-3.1.0/etc/certs/httpd.crt /etc/nginx/ssl/
-```
-
-### 8. Next we install, clear the nginx.conf file and configure NGINX to proxy-pass connections.  
 
 ```
+
+- From the Gluu server:
+
+```
+scp /opt/gluu-server-3.1.1/etc/certs/httpd.key root@c4.gluu.org:/etc/nginx/ssl/
+scp /opt/gluu-server-3.1.1/etc/certs/httpd.crt root@c4.gluu.org:/etc/nginx/ssl/
+```
+
+### 8. Next we install NGINX
+
+- On c4.gluu.org 
+
+```
+
 apt-get install nginx -y
-cd /etc/nginx/
->nginx.conf
-vi nginx.conf
+
 ```
+
+- And from the server we created our nginx.conf file (c5.gluu.org in my case), to the NGINX server (c4.gluu.org)
 
 - Put the following template in it's place. Make sure to change the `{serverX_ip_or_FQDN}` portion to your servers IP addresses or FQDN under the upstream section. Add as many servers as exist in your replication setup. The `server_name` needs to be your NGINX servers FQDN.    
 
